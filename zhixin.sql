@@ -13,3 +13,9 @@ INSERT INTO `newapi`.`users` (`id`, `username`, `password`, `display_name`, `rol
 
 
 INSERT INTO `newapi`.`options` (`key`, `value`) VALUES ('ModelPrice', '{\"agnes-image-2.1-flash\":0.04}');
+
+
+headers = {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer sk-XLjUamxpyqqWLpB58KlpUDgL7GmTnnHmhD09hqq61hULY0Lc"
+}
