@@ -27,7 +27,7 @@ export const API_ENDPOINTS = {
 export const DEFAULT_GROUP = 'default' as const
 
 export const DEFAULT_CONFIG: VideoConfig = {
-  model: 'kling-v1',
+  model: 'agnes-video-v2.0',
   group: DEFAULT_GROUP,
   resolution: '1080p',
   duration: '5',

@@ -27,7 +27,7 @@ export const API_ENDPOINTS = {
 export const DEFAULT_GROUP = 'default' as const
 
 export const DEFAULT_CONFIG: ImageConfig = {
-  model: 'dall-e-3',
+  model: 'agnes-image-2.1-flash',
   group: DEFAULT_GROUP,
   resolution: '1024x1024',
   quality: 'standard',

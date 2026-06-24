@@ -327,11 +327,36 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		return nil, err
 	}
 	applyHeaderOverrideToRequest(req, headerOverride)
+	headerLog := formatHeadersForLog(req.Header)
+	if info.RelayMode == constant.RelayModeImagesGenerations || info.RelayMode == constant.RelayModeImagesEdits {
+		logger.LogInfo(c.Request.Context(), fmt.Sprintf("upstream request url: %s", fullRequestURL))
+		logger.LogInfo(c.Request.Context(), fmt.Sprintf("upstream request headers: %s", headerLog))
+	} else {
+		logger.LogDebug(c, "upstream request headers: %s", headerLog)
+	}
 	resp, err := doRequest(c, req, info)
 	if err != nil {
 		return nil, fmt.Errorf("do request failed: %w", err)
 	}
 	return resp, nil
+}
+
+func formatHeadersForLog(header http.Header) string {
+	var pairs []string
+	for key, values := range header {
+		for _, value := range values {
+			displayValue := value
+			if strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "api-key") || strings.EqualFold(key, "x-goog-api-key") {
+				if len(value) > 8 {
+					displayValue = value[:4] + "****" + value[len(value)-4:]
+				} else {
+					displayValue = "****"
+				}
+			}
+			pairs = append(pairs, fmt.Sprintf("%s: %s", key, displayValue))
+		}
+	}
+	return strings.Join(pairs, "; ")
 }
 
 func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
@@ -359,6 +384,13 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 		return nil, err
 	}
 	applyHeaderOverrideToRequest(req, headerOverride)
+	headerLog := formatHeadersForLog(req.Header)
+	if info.RelayMode == constant.RelayModeImagesGenerations || info.RelayMode == constant.RelayModeImagesEdits {
+		logger.LogInfo(c.Request.Context(), fmt.Sprintf("upstream request url: %s", fullRequestURL))
+		logger.LogInfo(c.Request.Context(), fmt.Sprintf("upstream request headers: %s", headerLog))
+	} else {
+		logger.LogDebug(c, "upstream request headers: %s", headerLog)
+	}
 	resp, err := doRequest(c, req, info)
 	if err != nil {
 		return nil, fmt.Errorf("do request failed: %w", err)
@@ -488,11 +520,13 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	var client *http.Client
 	var err error
 	if info.ChannelSetting.Proxy != "" {
+		logger.LogInfo(c.Request.Context(), fmt.Sprintf("using proxy for channel #%d: %s", info.ChannelId, info.ChannelSetting.Proxy))
 		client, err = service.NewProxyHttpClient(info.ChannelSetting.Proxy)
 		if err != nil {
 			return nil, fmt.Errorf("new proxy http client failed: %w", err)
 		}
 	} else {
+		logger.LogInfo(c.Request.Context(), fmt.Sprintf("no proxy for channel #%d", info.ChannelId))
 		client = service.GetHttpClient()
 	}
 

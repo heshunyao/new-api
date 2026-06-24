@@ -17,21 +17,24 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useContext } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Layout, Toast, Select, Button, TextArea } from '@douyinfe/semi-ui';
 import { Image, Download, RefreshCw, Loader2, Sparkles, Layers, Package, Wand2, Upload as UploadIcon } from 'lucide-react';
 import { API } from '../../helpers/api';
 import { getUserIdFromLocalStorage } from '../../helpers/utils';
 import { useIsMobile } from '../../hooks/common/useIsMobile';
+import { UserContext } from '../../context/User';
+import { API_ENDPOINTS } from '../../constants/playground.constants';
 
 const ImagePlayground = () => {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
+  const [userState] = useContext(UserContext);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [prompt, setPrompt] = useState('');
-  const [model, setModel] = useState('gpt-image-2');
+  const [model, setModel] = useState('agnes-image-2.1-flash');
   const [clarity, setClarity] = useState('1K');
   const [aspectRatio, setAspectRatio] = useState('auto');
   const [models, setModels] = useState([]);
@@ -43,28 +46,64 @@ const ImagePlayground = () => {
   const [isTextToImage, setIsTextToImage] = useState(true);
   const fileInputRef = useRef(null);
 
-  useEffect(() => {
-    const loadModels = async () => {
-      try {
-        setLoading(true);
-        const res = await API.get('/api/status');
-        if (res.data?.data) {
-          const data = res.data.data;
-          setGroups(data.groups || []);
-          setModels(data.channel_models || []);
+  const loadModels = useCallback(async () => {
+    try {
+      setLoading(true);
+      const res = await API.get(API_ENDPOINTS.USER_MODELS);
+      const { success, data } = res.data;
+      if (success && Array.isArray(data)) {
+        const modelOptions = data.map((m) => ({
+          label: m.model_name || m,
+          value: m.model_name || m,
+        }));
+        setModels(modelOptions);
+        if (modelOptions.length > 0) {
+          const hasCurrentModel = modelOptions.some((opt) => opt.value === model);
+          if (!hasCurrentModel) {
+            setModel(modelOptions[0].value);
+          }
         }
-      } catch (error) {
-        console.error('Failed to load models:', error);
-      } finally {
-        setLoading(false);
       }
-    };
-    loadModels();
-  }, []);
+    } catch (error) {
+      console.error('Failed to load models:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, [model]);
 
-  const filteredModels = selectedGroup
-    ? models.filter((m) => m.group === selectedGroup && m.type === 'image')
-    : models.filter((m) => m.type === 'image');
+  const loadGroups = useCallback(async () => {
+    try {
+      const res = await API.get(API_ENDPOINTS.USER_GROUPS);
+      const { success, data } = res.data;
+      if (success && data) {
+        const groupOptions = Object.entries(data).map(([group, info]) => ({
+          label: group,
+          value: group,
+          ratio: info.ratio,
+          desc: info.desc,
+        }));
+        setGroups(groupOptions);
+        if (groupOptions.length > 0) {
+          const userGroup = userState?.user?.group;
+          const defaultGroup = userGroup && groupOptions.some((g) => g.value === userGroup)
+            ? userGroup
+            : groupOptions[0].value;
+          setSelectedGroup(defaultGroup);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to load groups:', error);
+    }
+  }, [userState?.user?.group]);
+
+  useEffect(() => {
+    if (userState?.user) {
+      loadModels();
+      loadGroups();
+    }
+  }, [userState?.user, loadModels, loadGroups]);
+
+  const filteredModels = models;
 
   const handleGenerate = async () => {
     if (!prompt.trim()) {
@@ -81,7 +120,7 @@ const ImagePlayground = () => {
           'New-Api-User': getUserIdFromLocalStorage(),
         },
         body: JSON.stringify({
-          model: model || 'gpt-image-2',
+          model: model || 'agnes-image-2.1-flash',
           group: selectedGroup || 'default',
           prompt,
           n: 1,
@@ -203,14 +242,9 @@ const ImagePlayground = () => {
                 className='w-full'
                 placeholder={t('选择分组')}
                 value={selectedGroup}
-                onChange={(value) => {
-                  setSelectedGroup(value);
-                  setModel('');
-                }}
-                optionList={[
-                  { value: '', label: t('全部分组') },
-                  ...groups.map((g) => ({ value: g, label: g })),
-                ]}
+                onChange={(value) => setSelectedGroup(value)}
+                disabled={loading || groups.length === 0}
+                optionList={groups.map((g) => ({ value: g.value, label: g.label }))}
               />
             </div>
 
@@ -224,13 +258,10 @@ const ImagePlayground = () => {
                 placeholder={t('选择模型')}
                 value={model}
                 onChange={(value) => setModel(value)}
-                disabled={loading}
-                optionList={[
-                  { value: '', label: t('选择模型') },
-                  ...filteredModels.map((m) => ({ value: m.name, label: m.name })),
-                ]}
+                disabled={loading || filteredModels.length === 0}
+                optionList={filteredModels.map((m) => ({ value: m.value, label: m.label }))}
               />
-              <p className='text-xs text-gray-500 mt-1'>{t('可用图片模型')} {filteredModels.length} {t('个')}</p>
+              <p className='text-xs text-gray-500 mt-1'>{t('可用模型')} {filteredModels.length} {t('个')}</p>
             </div>
 
             <div className='pt-2 border-t border-gray-100'>

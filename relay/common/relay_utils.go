@@ -23,17 +23,34 @@ type HasImage interface {
 }
 
 func GetFullRequestURL(baseURL string, requestURL string, channelType int) string {
-	fullRequestURL := fmt.Sprintf("%s%s", baseURL, requestURL)
-
 	if strings.HasPrefix(baseURL, "https://gateway.ai.cloudflare.com") {
 		switch channelType {
 		case constant.ChannelTypeOpenAI:
-			fullRequestURL = fmt.Sprintf("%s%s", baseURL, strings.TrimPrefix(requestURL, "/v1"))
+			return fmt.Sprintf("%s%s", baseURL, strings.TrimPrefix(requestURL, "/v1"))
 		case constant.ChannelTypeAzure:
-			fullRequestURL = fmt.Sprintf("%s%s", baseURL, strings.TrimPrefix(requestURL, "/openai/deployments"))
+			return fmt.Sprintf("%s%s", baseURL, strings.TrimPrefix(requestURL, "/openai/deployments"))
 		}
 	}
-	return fullRequestURL
+
+	basePath := extractURLPath(baseURL)
+	if basePath != "" && basePath != "/" {
+		basePath = strings.TrimSuffix(basePath, "/")
+		if strings.HasPrefix(requestURL, basePath+"/") || requestURL == basePath {
+			requestURL = strings.TrimPrefix(requestURL, basePath)
+		}
+	}
+
+	return fmt.Sprintf("%s%s", baseURL, requestURL)
+}
+
+func extractURLPath(rawURL string) string {
+	if idx := strings.Index(rawURL, "://"); idx >= 0 {
+		rest := rawURL[idx+3:]
+		if pathIdx := strings.Index(rest, "/"); pathIdx >= 0 {
+			return rest[pathIdx:]
+		}
+	}
+	return ""
 }
 
 func GetAPIVersion(c *gin.Context) string {

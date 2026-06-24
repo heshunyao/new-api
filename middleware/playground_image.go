@@ -81,7 +81,7 @@ func PlaygroundImageFallback() gin.HandlerFunc {
 					"created": 1782178956,
 					"data": []gin.H{
 						{
-							"b64_json":      getDefaultImageBase64(),
+							"b64_json":       getDefaultImageBase64(),
 							"revised_prompt": "默认图片（渠道不可用）",
 						},
 					},
@@ -89,7 +89,7 @@ func PlaygroundImageFallback() gin.HandlerFunc {
 					"output_format": "png",
 					"quality":       "auto",
 					"size":          "auto",
-					"model":         "gpt-image-2-codex",
+					"model":         "agnes-image-2.1-flash",
 					"usage": gin.H{
 						"input_tokens": 29,
 						"input_tokens_details": gin.H{

@@ -131,9 +131,9 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 
 func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	if info.Action == constant.TaskActionRemix {
-		return fmt.Sprintf("%s/v1/videos/%s/remix", a.baseURL, info.OriginTaskID), nil
+		return relaycommon.GetFullRequestURL(a.baseURL, fmt.Sprintf("/v1/videos/%s/remix", info.OriginTaskID), a.ChannelType), nil
 	}
-	return fmt.Sprintf("%s/v1/videos", a.baseURL), nil
+	return relaycommon.GetFullRequestURL(a.baseURL, "/v1/videos", a.ChannelType), nil
 }
 
 // BuildRequestHeader sets required headers.
@@ -263,7 +263,7 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 		return nil, fmt.Errorf("invalid task_id")
 	}
 
-	uri := fmt.Sprintf("%s/v1/videos/%s", baseUrl, taskID)
+	uri := relaycommon.GetFullRequestURL(baseUrl, fmt.Sprintf("/v1/videos/%s", taskID), a.ChannelType)
 
 	req, err := http.NewRequest(http.MethodGet, uri, nil)
 	if err != nil {

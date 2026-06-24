@@ -17,21 +17,24 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useContext } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Layout, Toast, Select, Button, TextArea } from '@douyinfe/semi-ui';
 import { Video, Download, RefreshCw, Loader2, Play, Sparkles, Layers, Package } from 'lucide-react';
 import { API } from '../../helpers/api';
 import { getUserIdFromLocalStorage } from '../../helpers/utils';
 import { useIsMobile } from '../../hooks/common/useIsMobile';
+import { UserContext } from '../../context/User';
+import { API_ENDPOINTS } from '../../constants/playground.constants';
 
 const VideoPlayground = () => {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
+  const [userState] = useContext(UserContext);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [prompt, setPrompt] = useState('');
-  const [model, setModel] = useState('');
+  const [model, setModel] = useState('agnes-video-v2.0');
   const [duration, setDuration] = useState('4');
   const [fps, setFps] = useState('30');
   const [resolution, setResolution] = useState('1280 x 720');
@@ -45,28 +48,64 @@ const VideoPlayground = () => {
   const [isTextToVideo, setIsTextToVideo] = useState(true);
   const fileInputRef = useRef(null);
 
-  useEffect(() => {
-    const loadModels = async () => {
-      try {
-        setLoading(true);
-        const res = await API.get('/api/status');
-        if (res.data?.data) {
-          const data = res.data.data;
-          setGroups(data.groups || []);
-          setModels(data.channel_models || []);
+  const loadModels = useCallback(async () => {
+    try {
+      setLoading(true);
+      const res = await API.get(API_ENDPOINTS.USER_MODELS);
+      const { success, data } = res.data;
+      if (success && Array.isArray(data)) {
+        const modelOptions = data.map((m) => ({
+          label: m.model_name || m,
+          value: m.model_name || m,
+        }));
+        setModels(modelOptions);
+        if (modelOptions.length > 0) {
+          const hasCurrentModel = modelOptions.some((opt) => opt.value === model);
+          if (!hasCurrentModel) {
+            setModel(modelOptions[0].value);
+          }
         }
-      } catch (error) {
-        console.error('Failed to load models:', error);
-      } finally {
-        setLoading(false);
       }
-    };
-    loadModels();
-  }, []);
+    } catch (error) {
+      console.error('Failed to load models:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, [model]);
 
-  const filteredModels = selectedGroup
-    ? models.filter((m) => m.group === selectedGroup && m.type === 'video')
-    : models.filter((m) => m.type === 'video');
+  const loadGroups = useCallback(async () => {
+    try {
+      const res = await API.get(API_ENDPOINTS.USER_GROUPS);
+      const { success, data } = res.data;
+      if (success && data) {
+        const groupOptions = Object.entries(data).map(([group, info]) => ({
+          label: group,
+          value: group,
+          ratio: info.ratio,
+          desc: info.desc,
+        }));
+        setGroups(groupOptions);
+        if (groupOptions.length > 0) {
+          const userGroup = userState?.user?.group;
+          const defaultGroup = userGroup && groupOptions.some((g) => g.value === userGroup)
+            ? userGroup
+            : groupOptions[0].value;
+          setSelectedGroup(defaultGroup);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to load groups:', error);
+    }
+  }, [userState?.user?.group]);
+
+  useEffect(() => {
+    if (userState?.user) {
+      loadModels();
+      loadGroups();
+    }
+  }, [userState?.user, loadModels, loadGroups]);
+
+  const filteredModels = models;
 
   const handleUploadRefImage = (e) => {
     const files = e.target.files;
@@ -110,6 +149,7 @@ const VideoPlayground = () => {
       setGenerating(true);
       const body = {
         model: model || 'kling-v1',
+        group: selectedGroup || 'default',
         prompt,
         duration: parseInt(duration),
         fps: parseInt(fps),
@@ -120,7 +160,7 @@ const VideoPlayground = () => {
         body.image_url = referenceImages[0];
       }
 
-      const response = await fetch('/api/pg/videos/generations', {
+      const response = await fetch('/pg/videos/generations', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -195,8 +235,8 @@ const VideoPlayground = () => {
                 style={{ width: '100%' }}
               >
                 {groups.map((g) => (
-                  <Select.Option key={g} value={g}>
-                    {g}
+                  <Select.Option key={g.value} value={g.value}>
+                    {g.label}
                   </Select.Option>
                 ))}
               </Select>
@@ -216,8 +256,8 @@ const VideoPlayground = () => {
                 style={{ width: '100%' }}
               >
                 {filteredModels.map((m) => (
-                  <Select.Option key={m.name} value={m.name}>
-                    {m.name}
+                  <Select.Option key={m.value} value={m.value}>
+                    {m.label}
                   </Select.Option>
                 ))}
               </Select>
@@ -246,9 +286,9 @@ const VideoPlayground = () => {
                   onChange={(value) => setResolution(value)}
                   style={{ width: '100%' }}
                 >
-                  <Select.Option value='1280 x 720'>1280 x 720</Select.Option>
-                  <Select.Option value='1920 x 1080'>1920 x 1080</Select.Option>
-                  <Select.Option value='3840 x 2160'>3840 x 2160</Select.Option>
+                  <Select.Option value='1080p'>1080p</Select.Option>
+                  <Select.Option value='720p'>720p</Select.Option>
+                  <Select.Option value='480p'>480p</Select.Option>
                 </Select>
               </div>
               <div>
