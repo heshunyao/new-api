@@ -51,6 +51,6 @@ export interface VideoTaskResponse {
   success: boolean
   task_id?: string
   status?: 'queued' | 'processing' | 'completed' | 'failed'
-  data?: GeneratedVideo[]
+  data?: Record<string, any>
   message?: string
 }

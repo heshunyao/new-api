@@ -11,6 +11,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay"
@@ -268,6 +269,10 @@ func PlaygroundVideo(c *gin.Context) {
 		return
 	}
 
+	// 调试：检查渠道设置
+	channelSetting := channel.GetSetting()
+	common.SysLog(fmt.Sprintf("DEBUG: channel %d setting proxy: %s", channel.Id, channelSetting.Proxy))
+
 	// 设置 relay_mode 为视频提交模式
 	c.Set("relay_mode", relayconstant.RelayModeVideoSubmit)
 
@@ -295,7 +300,20 @@ func PlaygroundVideo(c *gin.Context) {
 		return
 	}
 
+	// 用 silentResponseWriter 拦截 RelayTaskSubmit 内部的 c.JSON 写入，避免双次响应
+	originalWriter := c.Writer
+	silentWriter := &silentResponseWriter{
+		ResponseWriter: originalWriter,
+		buf:            bytes.NewBuffer(nil),
+		hdrs:           make(http.Header),
+	}
+	c.Writer = silentWriter
+
 	result, taskErr := relay.RelayTaskSubmit(c, relayInfo)
+
+	// 恢复原始 writer
+	c.Writer = originalWriter
+
 	if taskErr != nil {
 		c.JSON(taskErr.StatusCode, gin.H{
 			"success": false,
@@ -309,6 +327,7 @@ func PlaygroundVideo(c *gin.Context) {
 	}
 	service.LogTaskConsumption(c, relayInfo)
 
+	// 保存任务到数据库
 	task := model.InitTask(result.Platform, relayInfo)
 	task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
 	task.PrivateData.BillingSource = relayInfo.BillingSource
@@ -329,14 +348,142 @@ func PlaygroundVideo(c *gin.Context) {
 		common.SysError("insert task error: " + insertErr.Error())
 	}
 
-	// 立即返回 task_id，不同步等待视频生成完成
+	// 同步等待视频生成完成
+	videoURL, taskErr := waitForVideoCompletion(c, &channel, task, result.Platform, req.Model)
+	if taskErr != nil {
+		c.JSON(taskErr.StatusCode, gin.H{
+			"success": false,
+			"message": taskErr.Message,
+		})
+		return
+	}
+
+	// 将 url 直接添加到任务数据中返回
+	var taskData map[string]interface{}
+	if result.TaskData != nil {
+		if err := common.Unmarshal(result.TaskData, &taskData); err != nil {
+			common.SysError("unmarshal task data error: " + err.Error())
+			taskData = make(map[string]interface{})
+		}
+	} else {
+		taskData = make(map[string]interface{})
+	}
+	taskData["url"] = videoURL
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"task_id": task.TaskID,
-		"data": []gin.H{
-			{"url": "", "status": "queued", "message": "视频生成任务已提交，请轮询 /pg/videos/status/" + task.TaskID + " 获取结果"},
-		},
+		"data":    taskData,
 	})
+}
+
+// waitForVideoCompletion 同步等待视频生成完成，使用 MediaExtractor 保证多模型通用性
+func waitForVideoCompletion(c *gin.Context, ch *model.Channel, task *model.Task, platform constant.TaskPlatform, modelName string) (string, *dto.TaskError) {
+	adaptor := relay.GetTaskAdaptor(platform)
+	if adaptor == nil {
+		return "", service.TaskErrorWrapperLocal(fmt.Errorf("adaptor not found for platform %s", platform), "adaptor_not_found", http.StatusInternalServerError)
+	}
+
+	info := &relaycommon.RelayInfo{}
+	info.ChannelMeta = &relaycommon.ChannelMeta{
+		ChannelBaseUrl: ch.GetBaseURL(),
+		ChannelType:    ch.Type,
+		ApiKey:         ch.Key,
+	}
+	adaptor.Init(info)
+
+	proxy := ch.GetSetting().Proxy
+	baseURL := ch.GetBaseURL()
+
+	extractor, extractorErr := service.GetMediaExtractor(modelName)
+
+	timeout := time.After(10 * time.Minute)
+	pollInterval := time.NewTicker(15 * time.Second)
+	defer pollInterval.Stop()
+
+	for {
+		select {
+		case <-pollInterval.C:
+			resp, err := adaptor.FetchTask(baseURL, ch.Key, map[string]any{
+				"task_id": task.GetUpstreamTaskID(),
+				"action":  task.Action,
+			}, proxy)
+			if err != nil {
+				common.SysLog(fmt.Sprintf("waitForVideoCompletion FetchTask error: %v", err))
+				continue
+			}
+			defer resp.Body.Close()
+
+			responseBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				common.SysLog(fmt.Sprintf("waitForVideoCompletion read body error: %v", err))
+				continue
+			}
+
+			if extractorErr == nil && extractor != nil {
+				isSuccess, _ := extractor.IsVideoSuccess(responseBody)
+				isFail, _ := extractor.IsVideoFail(responseBody)
+
+				if isSuccess {
+					videoURL, urlErr := extractor.ExtractVideoURL(responseBody)
+					if urlErr == nil && videoURL != "" {
+						task.Status = model.TaskStatusSuccess
+						task.Progress = "100%"
+						task.FinishTime = time.Now().Unix()
+						task.Data = responseBody
+						task.PrivateData.ResultURL = videoURL
+						_ = task.Update()
+						return videoURL, nil
+					}
+				}
+
+				if isFail {
+					reason := extractor.ExtractFailReason(responseBody)
+					task.Status = model.TaskStatusFailure
+					task.Progress = "100%"
+					task.FinishTime = time.Now().Unix()
+					task.FailReason = reason
+					task.Data = responseBody
+					_ = task.Update()
+					return "", service.TaskErrorWrapperLocal(fmt.Errorf("video generation failed: %s", reason), "video_generation_failed", http.StatusInternalServerError)
+				}
+
+				status, _ := extractor.GetVideoStatus(responseBody)
+				if status != "" {
+					task.Status = model.TaskStatus(status)
+					_ = task.Update()
+				}
+			} else {
+				taskResult, parseErr := adaptor.ParseTaskResult(responseBody)
+				if parseErr != nil {
+					common.SysLog(fmt.Sprintf("waitForVideoCompletion ParseTaskResult error: %v", parseErr))
+					continue
+				}
+
+				task.Status = model.TaskStatus(taskResult.Status)
+				if taskResult.Status == model.TaskStatusSuccess {
+					task.Progress = "100%"
+					task.FinishTime = time.Now().Unix()
+					if strings.HasPrefix(taskResult.Url, "http") {
+						task.Data = responseBody
+						task.PrivateData.ResultURL = taskResult.Url
+						_ = task.Update()
+						return taskResult.Url, nil
+					}
+				} else if taskResult.Status == model.TaskStatusFailure {
+					task.Progress = "100%"
+					task.FinishTime = time.Now().Unix()
+					task.FailReason = taskResult.Reason
+					task.Data = responseBody
+					_ = task.Update()
+					return "", service.TaskErrorWrapperLocal(fmt.Errorf("video generation failed: %s", taskResult.Reason), "video_generation_failed", http.StatusInternalServerError)
+				}
+				_ = task.Update()
+			}
+
+		case <-timeout:
+			return "", service.TaskErrorWrapperLocal(fmt.Errorf("video generation timeout after 10 minutes"), "timeout", http.StatusRequestTimeout)
+		}
+	}
 }
 
 // PlaygroundVideoStatus 轮询查询视频生成状态

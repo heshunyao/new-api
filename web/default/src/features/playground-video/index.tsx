@@ -164,15 +164,20 @@ export function VideoPlayground() {
     }
   }, [groupsData, config.group, updateConfig])
 
-  const POLLING_INTERVAL = 15000 // 15 seconds
-  const MAX_POLLING_TIME = 600000 // 10 minutes
-
   const handleGenerate = async () => {
     if (!prompt.trim()) {
       toast.error(t('Please enter a prompt'))
       return
     }
     setIsGenerating(true)
+
+    const placeholderVideo: GeneratedVideo = {
+      url: '',
+      cover_url: undefined,
+      revised_prompt: t('Video is being generated, please wait...'),
+    }
+    setGeneratedVideos([placeholderVideo])
+
     try {
       const res = await api.post<VideoTaskResponse>(
         API_ENDPOINTS.VIDEO_GENERATION,
@@ -184,79 +189,27 @@ export function VideoPlayground() {
           duration: parameterEnabled.duration ? config.duration : undefined,
           fps: parameterEnabled.fps ? config.fps : undefined,
         },
-        { skipErrorHandler: true } as Record<string, unknown>
+        { skipErrorHandler: true, timeout: 600000 } as Record<string, unknown>
       )
       const taskData = res.data
 
       if (!taskData?.success) {
         toast.error(taskData?.message || t('Video generation failed'))
-        setIsGenerating(false)
+        setGeneratedVideos([])
         return
       }
 
-      // Check if task is queued - need to poll for status
-      if (taskData.status === 'queued' && taskData.task_id) {
-        const placeholderVideo: GeneratedVideo = {
-          url: '',
-          cover_url: undefined,
-          revised_prompt: taskData.message,
-        }
-        setGeneratedVideos([placeholderVideo])
-
-        // Start polling
-        const startTime = Date.now()
-        const poll = async () => {
-          try {
-            const statusRes = await api.get<VideoTaskResponse>(
-              `${API_ENDPOINTS.VIDEO_STATUS}/${taskData.task_id}`
-            )
-            const statusData = statusRes.data
-
-            if (statusData?.status === 'completed' && statusData.data?.[0]?.url) {
-              setGeneratedVideos(statusData.data)
-              setIsGenerating(false)
-              return
-            }
-
-            if (statusData?.status === 'failed') {
-              toast.error(statusData.message || t('Video generation failed'))
-              setGeneratedVideos([])
-              setIsGenerating(false)
-              return
-            }
-
-            // Continue polling if not completed/failed and within time limit
-            if (Date.now() - startTime < MAX_POLLING_TIME) {
-              setTimeout(poll, POLLING_INTERVAL)
-            } else {
-              toast.error(t('Video generation timeout'))
-              setIsGenerating(false)
-            }
-          } catch (error) {
-            console.error('Polling error:', error)
-            if (Date.now() - startTime < MAX_POLLING_TIME) {
-              setTimeout(poll, POLLING_INTERVAL)
-            } else {
-              toast.error(t('Video generation timeout'))
-              setIsGenerating(false)
-            }
-          }
-        }
-
-        // Start first poll after interval
-        setTimeout(poll, POLLING_INTERVAL)
-        return
+      const video: GeneratedVideo = {
+        url: taskData?.data?.url,
       }
-
-      // Immediate response (no polling needed)
-      const videos: GeneratedVideo[] = taskData.data ?? []
-      setGeneratedVideos(videos)
+      setGeneratedVideos([video])
     } catch (error) {
       toast.error(
         error instanceof Error
           ? error.message
           : t('Video generation failed')
       )
+      setGeneratedVideos([])
     } finally {
       setIsGenerating(false)
     }
