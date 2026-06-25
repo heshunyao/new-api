@@ -48,6 +48,7 @@ import type {
   ModelOption,
   GroupOption,
   GeneratedVideo,
+  VideoTaskResponse,
 } from './types'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -163,6 +164,9 @@ export function VideoPlayground() {
     }
   }, [groupsData, config.group, updateConfig])
 
+  const POLLING_INTERVAL = 15000 // 15 seconds
+  const MAX_POLLING_TIME = 600000 // 10 minutes
+
   const handleGenerate = async () => {
     if (!prompt.trim()) {
       toast.error(t('Please enter a prompt'))
@@ -170,7 +174,7 @@ export function VideoPlayground() {
     }
     setIsGenerating(true)
     try {
-      const res = await api.post(
+      const res = await api.post<VideoTaskResponse>(
         API_ENDPOINTS.VIDEO_GENERATION,
         {
           model: config.model,
@@ -182,7 +186,70 @@ export function VideoPlayground() {
         },
         { skipErrorHandler: true } as Record<string, unknown>
       )
-      const videos: GeneratedVideo[] = res.data?.data ?? []
+      const taskData = res.data
+
+      if (!taskData?.success) {
+        toast.error(taskData?.message || t('Video generation failed'))
+        setIsGenerating(false)
+        return
+      }
+
+      // Check if task is queued - need to poll for status
+      if (taskData.status === 'queued' && taskData.task_id) {
+        const placeholderVideo: GeneratedVideo = {
+          url: '',
+          cover_url: undefined,
+          revised_prompt: taskData.message,
+        }
+        setGeneratedVideos([placeholderVideo])
+
+        // Start polling
+        const startTime = Date.now()
+        const poll = async () => {
+          try {
+            const statusRes = await api.get<VideoTaskResponse>(
+              `${API_ENDPOINTS.VIDEO_STATUS}/${taskData.task_id}`
+            )
+            const statusData = statusRes.data
+
+            if (statusData?.status === 'completed' && statusData.data?.[0]?.url) {
+              setGeneratedVideos(statusData.data)
+              setIsGenerating(false)
+              return
+            }
+
+            if (statusData?.status === 'failed') {
+              toast.error(statusData.message || t('Video generation failed'))
+              setGeneratedVideos([])
+              setIsGenerating(false)
+              return
+            }
+
+            // Continue polling if not completed/failed and within time limit
+            if (Date.now() - startTime < MAX_POLLING_TIME) {
+              setTimeout(poll, POLLING_INTERVAL)
+            } else {
+              toast.error(t('Video generation timeout'))
+              setIsGenerating(false)
+            }
+          } catch (error) {
+            console.error('Polling error:', error)
+            if (Date.now() - startTime < MAX_POLLING_TIME) {
+              setTimeout(poll, POLLING_INTERVAL)
+            } else {
+              toast.error(t('Video generation timeout'))
+              setIsGenerating(false)
+            }
+          }
+        }
+
+        // Start first poll after interval
+        setTimeout(poll, POLLING_INTERVAL)
+        return
+      }
+
+      // Immediate response (no polling needed)
+      const videos: GeneratedVideo[] = taskData.data ?? []
       setGeneratedVideos(videos)
     } catch (error) {
       toast.error(
@@ -508,7 +575,16 @@ export function VideoPlayground() {
                       className='max-h-[60vh] rounded-lg shadow-lg'
                       poster={video.cover_url}
                     />
-                  ) : null}
+                  ) : (
+                    <div className='flex h-[300px] w-full items-center justify-center rounded-lg bg-muted'>
+                      <div className='flex flex-col items-center gap-2 text-muted-foreground'>
+                        <Loader2 className='size-8 animate-spin' />
+                        <p className='text-sm'>
+                          {t('Video is being generated, please wait...')}
+                        </p>
+                      </div>
+                    </div>
+                  )}
                   {video.revised_prompt && (
                     <div className='absolute bottom-0 left-0 right-0 rounded-b-lg bg-black/60 p-3 text-sm text-white opacity-0 transition-opacity group-hover:opacity-100'>
                       {video.revised_prompt}

@@ -136,7 +136,33 @@ func PlaygroundImage(c *gin.Context) {
 	}
 	_ = middleware.SetupContextForToken(c, tempToken)
 
+	origWriter := c.Writer
+	buf := &bytes.Buffer{}
+	c.Writer = &silentResponseWriter{
+		ResponseWriter: origWriter,
+		buf:            buf,
+	}
+
 	Relay(c, types.RelayFormatOpenAIImage)
+
+	c.Writer = origWriter
+	responseBody := buf.Bytes()
+
+	ext, extErr := service.GetMediaExtractor(req.Model)
+	if extErr == nil {
+		url, urlErr := ext.ExtractImageURL(responseBody)
+		if urlErr == nil && url != "" {
+			c.JSON(http.StatusOK, gin.H{
+				"success": true,
+				"data": []gin.H{
+					{"url": url},
+				},
+			})
+			return
+		}
+	}
+
+	c.Data(http.StatusOK, "application/json", responseBody)
 }
 
 func PlaygroundVideo(c *gin.Context) {
@@ -269,17 +295,7 @@ func PlaygroundVideo(c *gin.Context) {
 		return
 	}
 
-	origWriter := c.Writer
-	buf := &bytes.Buffer{}
-	c.Writer = &silentResponseWriter{
-		ResponseWriter: origWriter,
-		buf:            buf,
-	}
-
 	result, taskErr := relay.RelayTaskSubmit(c, relayInfo)
-
-	c.Writer = origWriter
-
 	if taskErr != nil {
 		c.JSON(taskErr.StatusCode, gin.H{
 			"success": false,
@@ -313,7 +329,90 @@ func PlaygroundVideo(c *gin.Context) {
 		common.SysError("insert task error: " + insertErr.Error())
 	}
 
-	adaptor := relay.GetTaskAdaptor(result.Platform)
+	// 立即返回 task_id，不同步等待视频生成完成
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"task_id": task.TaskID,
+		"data": []gin.H{
+			{"url": "", "status": "queued", "message": "视频生成任务已提交，请轮询 /pg/videos/status/" + task.TaskID + " 获取结果"},
+		},
+	})
+}
+
+// PlaygroundVideoStatus 轮询查询视频生成状态
+func PlaygroundVideoStatus(c *gin.Context) {
+	taskID := c.Param("task_id")
+	if taskID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "task_id is required",
+		})
+		return
+	}
+
+	// 从数据库查询任务
+	var task model.Task
+	if err := model.DB.Where("task_id = ?", taskID).First(&task).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "task not found",
+		})
+		return
+	}
+
+	// 如果已完成或失败，直接返回结果
+	if task.Status == model.TaskStatusSuccess {
+		c.JSON(http.StatusOK, gin.H{
+			"success":  true,
+			"status":   task.Status,
+			"progress": task.Progress,
+			"data": []gin.H{
+				{"url": task.PrivateData.ResultURL},
+			},
+		})
+		return
+	}
+
+	if task.Status == model.TaskStatusFailure {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"status":  task.Status,
+			"message": task.FailReason,
+		})
+		return
+	}
+
+	// 查询上游 API 获取最新状态
+	upstreamTaskID := task.PrivateData.UpstreamTaskID
+	if upstreamTaskID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "upstream task id not found",
+		})
+		return
+	}
+
+	// 获取任务的 channel 信息
+	platform := task.Platform
+	adaptor := relay.GetTaskAdaptor(platform)
+	if adaptor == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "adaptor not found for platform: " + string(platform),
+		})
+		return
+	}
+
+	// 获取 channel 的 baseURL 和 proxy
+	var channel model.Channel
+	if err := model.DB.Where("id = ?", task.ChannelId).First(&channel).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "channel not found",
+		})
+		return
+	}
+
 	baseURL := constant.ChannelBaseURLs[channel.Type]
 	if channel.GetBaseURL() != "" {
 		baseURL = channel.GetBaseURL()
@@ -321,110 +420,183 @@ func PlaygroundVideo(c *gin.Context) {
 	proxy := channel.GetSetting().Proxy
 	apiKey := channel.Key
 
-	maxWaitTime := 10 * time.Minute
-	pollInterval := 15 * time.Second
-	startTime := time.Now()
-
-	var finalVideoURL string
-	for time.Since(startTime) < maxWaitTime {
-		resp, err := adaptor.FetchTask(baseURL, apiKey, map[string]any{
-			"task_id": result.UpstreamTaskID,
-			"action":  relayInfo.Action,
-		}, proxy)
-		if err != nil {
-			time.Sleep(pollInterval)
-			continue
-		}
-		responseBody, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		taskResult, parseErr := adaptor.ParseTaskResult(responseBody)
-		if parseErr != nil {
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		task.Data = responseBody
-		switch taskResult.Status {
-		case string(model.TaskStatusQueued), string(model.TaskStatusSubmitted), string(model.TaskStatusInProgress):
-			task.Status = model.TaskStatus(taskResult.Status)
-			if taskResult.Progress != "" {
-				task.Progress = taskResult.Progress
-			}
-			if task.StartTime == 0 && taskResult.Status == string(model.TaskStatusInProgress) {
-				task.StartTime = time.Now().Unix()
-			}
-			_ = task.Update()
-		case string(model.TaskStatusSuccess):
-			task.Status = model.TaskStatusSuccess
-			task.Progress = "100%"
-			task.FinishTime = time.Now().Unix()
-			if taskResult.Url != "" {
-				task.PrivateData.ResultURL = taskResult.Url
-			} else {
-				task.PrivateData.ResultURL = fmt.Sprintf("/v1/videos/%s/content", task.TaskID)
-			}
-			_ = task.Update()
-			finalVideoURL = task.PrivateData.ResultURL
-			goto taskDone
-		case string(model.TaskStatusFailure):
-			task.Status = model.TaskStatusFailure
-			task.Progress = "100%"
-			task.FinishTime = time.Now().Unix()
-			task.FailReason = taskResult.Reason
-			_ = task.Update()
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": taskResult.Reason,
-			})
-			return
-		default:
-		}
-
-		time.Sleep(pollInterval)
-	}
-
-taskDone:
-	if finalVideoURL == "" {
+	// 调用上游 API 查询状态
+	resp, err := adaptor.FetchTask(baseURL, apiKey, map[string]any{
+		"task_id": upstreamTaskID,
+		"action":  task.Action,
+	}, proxy)
+	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "视频生成超时",
+			"success":  true,
+			"status":   task.Status,
+			"progress": task.Progress,
+			"message":  "查询失败，请稍后重试",
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success":  true,
+			"status":   task.Status,
+			"progress": task.Progress,
+			"message":  "读取响应失败，请稍后重试",
 		})
 		return
 	}
 
+	// 更新任务数据
+	task.Data = responseBody
+
+	// 获取 MediaExtractor（优先用 BillingContext 中的模型名）
+	modelName := ""
+	if task.PrivateData.BillingContext != nil {
+		modelName = task.PrivateData.BillingContext.OriginModelName
+	}
+	if modelName == "" {
+		modelName = task.Properties.OriginModelName
+	}
+	ext, _ := service.GetMediaExtractor(modelName)
+
+	if ext != nil {
+		isSuccess, _ := ext.IsVideoSuccess(responseBody)
+		if isSuccess {
+			task.Status = model.TaskStatusSuccess
+			task.Progress = "100%"
+			task.FinishTime = time.Now().Unix()
+			videoURL, _ := ext.ExtractVideoURL(responseBody)
+			if videoURL != "" {
+				task.PrivateData.ResultURL = videoURL
+			}
+			_ = task.Update()
+			c.JSON(http.StatusOK, gin.H{
+				"success":  true,
+				"status":   string(task.Status),
+				"progress": task.Progress,
+				"data": []gin.H{
+					{"url": task.PrivateData.ResultURL},
+				},
+			})
+			return
+		}
+
+		isFail, _ := ext.IsVideoFail(responseBody)
+		if isFail {
+			task.Status = model.TaskStatusFailure
+			task.Progress = "100%"
+			task.FinishTime = time.Now().Unix()
+			task.FailReason = ext.ExtractFailReason(responseBody)
+			_ = task.Update()
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"status":  string(task.Status),
+				"message": task.FailReason,
+			})
+			return
+		}
+
+		status, _ := ext.GetVideoStatus(responseBody)
+		if status != "" {
+			task.Status = model.TaskStatus(status)
+			if task.StartTime == 0 {
+				task.StartTime = time.Now().Unix()
+			}
+			_ = task.Update()
+		}
+	} else {
+		taskResult, parseErr := adaptor.ParseTaskResult(responseBody)
+		if parseErr == nil {
+			switch taskResult.Status {
+			case string(model.TaskStatusQueued), string(model.TaskStatusSubmitted), string(model.TaskStatusInProgress):
+				task.Status = model.TaskStatus(taskResult.Status)
+				if taskResult.Progress != "" {
+					task.Progress = taskResult.Progress
+				}
+				if task.StartTime == 0 && taskResult.Status == string(model.TaskStatusInProgress) {
+					task.StartTime = time.Now().Unix()
+				}
+				_ = task.Update()
+			case string(model.TaskStatusSuccess):
+				task.Status = model.TaskStatusSuccess
+				task.Progress = "100%"
+				task.FinishTime = time.Now().Unix()
+				if taskResult.Url != "" {
+					task.PrivateData.ResultURL = taskResult.Url
+				}
+				_ = task.Update()
+				c.JSON(http.StatusOK, gin.H{
+					"success":  true,
+					"status":   string(task.Status),
+					"progress": task.Progress,
+					"data": []gin.H{
+						{"url": task.PrivateData.ResultURL},
+					},
+				})
+				return
+			case string(model.TaskStatusFailure):
+				task.Status = model.TaskStatusFailure
+				task.Progress = "100%"
+				task.FinishTime = time.Now().Unix()
+				task.FailReason = taskResult.Reason
+				_ = task.Update()
+				c.JSON(http.StatusOK, gin.H{
+					"success": false,
+					"status":  string(task.Status),
+					"message": task.FailReason,
+				})
+				return
+			}
+		}
+	}
+
+	// 返回当前状态
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"data": []gin.H{
-			{
-				"url": finalVideoURL,
-			},
-		},
+		"success":  true,
+		"status":   task.Status,
+		"progress": task.Progress,
+		"message":  "视频生成中，请继续轮询",
 	})
 }
 
 type silentResponseWriter struct {
 	gin.ResponseWriter
-	buf    *bytes.Buffer
-	status int
+	buf      *bytes.Buffer
+	status   int
+	hdrs     http.Header
+	wroteHdr bool
+}
+
+func (w *silentResponseWriter) Header() http.Header {
+	if w.hdrs == nil {
+		w.hdrs = make(http.Header)
+	}
+	return w.hdrs
 }
 
 func (w *silentResponseWriter) Write(data []byte) (int, error) {
+	if !w.wroteHdr {
+		w.WriteHeader(http.StatusOK)
+	}
 	return w.buf.Write(data)
 }
 
 func (w *silentResponseWriter) WriteHeader(statusCode int) {
+	if w.wroteHdr {
+		return
+	}
 	w.status = statusCode
+	w.wroteHdr = true
 }
 
 func (w *silentResponseWriter) WriteHeaderNow() {
 }
 
 func (w *silentResponseWriter) Status() int {
+	if w.status == 0 {
+		return http.StatusOK
+	}
 	return w.status
 }
 
@@ -433,5 +605,5 @@ func (w *silentResponseWriter) Size() int {
 }
 
 func (w *silentResponseWriter) Written() bool {
-	return w.buf.Len() > 0 || w.status > 0
+	return w.buf.Len() > 0 || w.wroteHdr
 }

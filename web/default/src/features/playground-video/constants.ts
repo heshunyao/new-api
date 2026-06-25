@@ -22,6 +22,7 @@ export const API_ENDPOINTS = {
   USER_MODELS: '/api/user/models',
   USER_GROUPS: '/api/user/self/groups',
   VIDEO_GENERATION: '/pg/videos/generations',
+  VIDEO_STATUS: '/pg/videos/status',
 } as const
 
 export const DEFAULT_GROUP = 'default' as const
