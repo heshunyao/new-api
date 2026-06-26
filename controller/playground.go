@@ -161,6 +161,16 @@ func PlaygroundImage(c *gin.Context) {
 			})
 			return
 		}
+		b64, b64Err := ext.ExtractImageB64JSON(responseBody)
+		if b64Err == nil && b64 != "" {
+			c.JSON(http.StatusOK, gin.H{
+				"success": true,
+				"data": []gin.H{
+					{"b64_json": b64},
+				},
+			})
+			return
+		}
 	}
 
 	c.Data(http.StatusOK, "application/json", responseBody)
